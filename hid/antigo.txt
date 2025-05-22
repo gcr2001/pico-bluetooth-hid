@@ -38,11 +38,11 @@
 #define BTSTACK_FILE__ "hid_keyboard_demo.c"
  
 // *****************************************************************************
-/* EXAMPLE_START(hid_keyboard_demo): HID Keyboard Classic with GPIO buttons
+/* EXAMPLE_START(hid_keyboard_demo): HID Keyboard Classic
  *
  * @text This HID Device example demonstrates how to implement
- * an HID keyboard using GPIO buttons connected to a Raspberry Pi Pico W.
- * GP10 = 'd', GP11 = 'w', GP21 = 'a', GP20 = 's', GP15 = Status LED
+ * an HID keyboard. Without a HAVE_BTSTACK_STDIN, a fixed demo text is sent
+ * If HAVE_BTSTACK_STDIN is defined, you can type from the terminal
  */
 // *****************************************************************************
 
@@ -55,25 +55,16 @@
 
 #include "btstack.h"
 
-// Add Pico SDK GPIO libraries
-#include "hardware/gpio.h"
-#include "pico/stdlib.h"
+#ifdef HAVE_BTSTACK_STDIN
+#include "btstack_stdin.h"
+#endif
+
+// to enable demo text on POSIX systems
+// #undef HAVE_BTSTACK_STDIN
 
 // timing of keypresses
 #define TYPING_KEYDOWN_MS  20
 #define TYPING_DELAY_MS    20
-
-// Button debounce time in milliseconds
-#define DEBOUNCE_MS 300
-
-// GPIO pins for buttons
-#define GPIO_BUTTON_D 10  // D key
-#define GPIO_BUTTON_W 11  // W key
-#define GPIO_BUTTON_A 21  // A key
-#define GPIO_BUTTON_S 20  // S key
-
-// GPIO pin for status LED
-#define GPIO_STATUS_LED 15  // Status LED
 
 // When not set to 0xffff, sniff and sniff subrating are enabled
 static uint16_t host_max_latency = 1600;
@@ -203,11 +194,10 @@ static uint8_t                send_modifier;
 static uint8_t                send_keycode;
 static bool                   send_active;
 
-// GPIO button debounce timers
-static uint32_t last_button_press_time[4] = {0, 0, 0, 0};
-
+#ifdef HAVE_BTSTACK_STDIN
 static bd_addr_t device_addr;
-static const char * device_addr_string = "BC:EC:5D:E6:15:03"; // Target device address
+static const char * device_addr_string = "BC:EC:5D:E6:15:03";
+#endif
 
 static enum {
     APP_BOOTING,
@@ -215,17 +205,6 @@ static enum {
     APP_CONNECTING,
     APP_CONNECTED
 } app_state = APP_BOOTING;
-
-// Function to update LED status based on connection state
-static void update_status_led(void) {
-    if (app_state == APP_CONNECTED) {
-        gpio_put(GPIO_STATUS_LED, 1);  // Turn LED ON when connected
-        printf("Status LED: ON (Connected)\n");
-    } else {
-        gpio_put(GPIO_STATUS_LED, 0);  // Turn LED OFF when not connected
-        printf("Status LED: OFF (Disconnected)\n");
-    }
-}
 
 // HID Keyboard lookup
 static bool lookup_keycode(uint8_t character, const uint8_t * table, int size, uint8_t * keycode){
@@ -294,91 +273,58 @@ static void queue_character(char character){
     }
 }
 
-// GPIO interrupt handler for buttons
-void gpio_callback(uint gpio, uint32_t events) {
-    // Only process on falling edge (button press)
-    if (events & GPIO_IRQ_EDGE_FALL) {
-        // Get current time for debouncing
-        uint32_t current_time = to_ms_since_boot(get_absolute_time());
-        uint8_t button_index;
-        char key_to_send = 0;
-        
-        // Map GPIO to array index and key character
-        switch(gpio) {
-            case GPIO_BUTTON_D:
-                button_index = 0;
-                key_to_send = 'd';
-                break;
-            case GPIO_BUTTON_W:
-                button_index = 1;
-                key_to_send = 'w';
-                break;
-            case GPIO_BUTTON_A:
-                button_index = 2;
-                key_to_send = 'a';
-                break;
-            case GPIO_BUTTON_S:
-                button_index = 3;
-                key_to_send = 's';
-                break;
-            default:
-                return; // Unknown GPIO
-        }
-        
-        // Debounce check
-        if (current_time - last_button_press_time[button_index] > DEBOUNCE_MS) {
-            last_button_press_time[button_index] = current_time;
-            
-            if (app_state == APP_CONNECTED) {
-                // Send key press if connected
-                printf("Button press on GPIO %d - sending '%c'\n", gpio, key_to_send);
-                queue_character(key_to_send);
-            } else if (app_state == APP_NOT_CONNECTED && gpio == GPIO_BUTTON_D) {
-                // Use button D to initiate connection if not connected
-                printf("Button press on GPIO %d - connecting to %s\n", gpio, bd_addr_to_str(device_addr));
-                hid_device_connect(device_addr, &hid_cid);
-                app_state = APP_CONNECTING;
-            }
-        }
+// Demo Application
+
+#ifdef HAVE_BTSTACK_STDIN
+
+// On systems with STDIN, we can directly type on the console
+
+static void stdin_process(char character){
+    switch (app_state){
+        case APP_BOOTING:
+        case APP_CONNECTING:
+            // ignore
+            break;
+        case APP_CONNECTED:
+            // add char to send buffer
+            queue_character(character);
+            break;
+        case APP_NOT_CONNECTED:
+            printf("Connecting to %s...\n", bd_addr_to_str(device_addr));
+            hid_device_connect(device_addr, &hid_cid);
+            break;
+        default:
+            btstack_assert(false);
+            break;
     }
 }
+#else
 
-// Initialize GPIO for status LED
-static void init_status_led(void) {
-    gpio_init(GPIO_STATUS_LED);
-    gpio_set_dir(GPIO_STATUS_LED, GPIO_OUT);
-    gpio_put(GPIO_STATUS_LED, 0);  // Start with LED OFF
-    printf("Status LED initialized on GPIO %d\n", GPIO_STATUS_LED);
+// On embedded systems, send constant demo text
+
+#define TYPING_DEMO_PERIOD_MS 100
+
+static const char * demo_text = "\n\nHello World!\n\nThis is the BTstack HID Keyboard Demo running on an Embedded Device.\n\n";
+static int demo_pos;
+static btstack_timer_source_t demo_text_timer;
+
+static void demo_text_timer_handler(btstack_timer_source_t * ts){
+    UNUSED(ts);
+
+    // queue character
+    uint8_t character = demo_text[demo_pos++];
+    if (demo_text[demo_pos] == 0){
+        demo_pos = 0;
+    }
+    queue_character(character);
+
+    // set timer for next character
+    btstack_run_loop_set_timer_handler(&demo_text_timer, demo_text_timer_handler);
+    btstack_run_loop_set_timer(&demo_text_timer, TYPING_DEMO_PERIOD_MS);
+    btstack_run_loop_add_timer(&demo_text_timer);
 }
 
-// Initialize GPIO for buttons
-static void init_gpio_buttons(void) {
-    // Initialize all buttons with pull-ups
-    gpio_init(GPIO_BUTTON_D);
-    gpio_set_dir(GPIO_BUTTON_D, GPIO_IN);
-    gpio_pull_up(GPIO_BUTTON_D);
-    
-    gpio_init(GPIO_BUTTON_W);
-    gpio_set_dir(GPIO_BUTTON_W, GPIO_IN);
-    gpio_pull_up(GPIO_BUTTON_W);
-    
-    gpio_init(GPIO_BUTTON_A);
-    gpio_set_dir(GPIO_BUTTON_A, GPIO_IN);
-    gpio_pull_up(GPIO_BUTTON_A);
-    
-    gpio_init(GPIO_BUTTON_S);
-    gpio_set_dir(GPIO_BUTTON_S, GPIO_IN);
-    gpio_pull_up(GPIO_BUTTON_S);
-    
-    // Set up GPIO interrupts for all buttons (falling edge)
-    gpio_set_irq_enabled_with_callback(GPIO_BUTTON_D, GPIO_IRQ_EDGE_FALL, true, &gpio_callback);
-    gpio_set_irq_enabled(GPIO_BUTTON_W, GPIO_IRQ_EDGE_FALL, true);
-    gpio_set_irq_enabled(GPIO_BUTTON_A, GPIO_IRQ_EDGE_FALL, true);
-    gpio_set_irq_enabled(GPIO_BUTTON_S, GPIO_IRQ_EDGE_FALL, true);
-    
-    printf("GPIO buttons initialized (D=%d, W=%d, A=%d, S=%d)\n", 
-           GPIO_BUTTON_D, GPIO_BUTTON_W, GPIO_BUTTON_A, GPIO_BUTTON_S);
-}
+#endif
 
 static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t * packet, uint16_t packet_size){
     UNUSED(channel);
@@ -390,8 +336,6 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t * pack
                 case BTSTACK_EVENT_STATE:
                     if (btstack_event_state_get_state(packet) != HCI_STATE_WORKING) return;
                     app_state = APP_NOT_CONNECTED;
-                    update_status_led();  // Update LED status
-                    printf("BTstack ready. Press button D to connect or pair.\n");
                     break;
 
                 case HCI_EVENT_USER_CONFIRMATION_REQUEST:
@@ -409,20 +353,22 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t * pack
                                 printf("Connection failed, status 0x%x\n", status);
                                 app_state = APP_NOT_CONNECTED;
                                 hid_cid = 0;
-                                update_status_led();  // Update LED status
                                 return;
                             }
                             app_state = APP_CONNECTED;
                             hid_cid = hid_subevent_connection_opened_get_hid_cid(packet);
-                            update_status_led();  // Update LED status
-                            printf("HID Connected! Press WASD buttons to send keystrokes.\n");
+#ifdef HAVE_BTSTACK_STDIN                        
+                            printf("HID Connected, please start typing...\n");
+#else                        
+                            printf("HID Connected, sending demo text...\n");
+                            demo_text_timer_handler(NULL);
+#endif
                             break;
                         case HID_SUBEVENT_CONNECTION_CLOSED:
                             btstack_run_loop_remove_timer(&send_timer);
                             printf("HID Disconnected\n");
                             app_state = APP_NOT_CONNECTED;
                             hid_cid = 0;
-                            update_status_led();  // Update LED status
                             break;
                         case HID_SUBEVENT_CAN_SEND_NOW:
                             if (send_keycode){
@@ -460,26 +406,12 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t * pack
  * At the end the Bluetooth stack is started.
  */
 
+/* LISTING_START(MainConfiguration): Setup HID Device */
+
+int btstack_main(int argc, const char * argv[]);
 int btstack_main(int argc, const char * argv[]){
     (void)argc;
     (void)argv;
-
-    // Initialize Pico stdio
-    stdio_init_all();
-    
-    // Allow time for USB to initialize
-    sleep_ms(2000);
-    
-    printf("\n\nHID Keyboard Demo with GPIO Buttons Starting...\n");
-    
-    // Initialize status LED
-    init_status_led();
-    
-    // Initialize GPIO buttons
-    init_gpio_buttons();
-    
-    // Parse the target Bluetooth address
-    sscanf_bd_addr(device_addr_string, device_addr);
 
     // allow to get found by inquiry
     gap_discoverable_control(1);
@@ -542,12 +474,16 @@ int btstack_main(int argc, const char * argv[]){
     // register for HID events
     hid_device_register_packet_handler(&packet_handler);
 
+#ifdef HAVE_BTSTACK_STDIN
+    sscanf_bd_addr(device_addr_string, device_addr);
+    btstack_stdin_setup(stdin_process);
+#endif
+
     btstack_ring_buffer_init(&send_buffer, send_buffer_storage, sizeof(send_buffer_storage));
 
     // turn on!
     hci_power_control(HCI_POWER_ON);
-    
-    printf("Bluetooth stack initialized. Press button D to connect.\n");
-    
     return 0;
 }
+/* LISTING_END */
+/* EXAMPLE_END */

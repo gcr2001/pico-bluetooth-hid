@@ -10,6 +10,7 @@ pico_add_extra_outputs(pico_emb)
 # Link the Project to extra libraries
 target_link_libraries(${PROJECT_NAME} PRIVATE
   pico_stdlib
+  hardware_adc
   pico_btstack_classic
   pico_btstack_cyw43
   pico_cyw43_arch_none

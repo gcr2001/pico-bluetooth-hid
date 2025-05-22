@@ -38,42 +38,38 @@
 #define BTSTACK_FILE__ "hid_keyboard_demo.c"
  
 // *****************************************************************************
-/* EXAMPLE_START(hid_keyboard_demo): HID Keyboard Classic with GPIO buttons
+/* GPIO Button Controlled HID Keyboard
  *
- * @text This HID Device example demonstrates how to implement
- * an HID keyboard using GPIO buttons connected to a Raspberry Pi Pico W.
- * GP10 = 'd', GP11 = 'w', GP21 = 'a', GP20 = 's', GP15 = Status LED
+ * This HID Device example implements a keyboard controlled by GPIO buttons
+ * on a Raspberry Pi. The buttons will simulate the keys W, A, S, D.
  */
 // *****************************************************************************
-
 
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <stdbool.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include "pico/stdlib.h"
+#include "hardware/gpio.h"  // Pico SDK GPIO library
 
 #include "btstack.h"
-
-// Add Pico SDK GPIO libraries
-#include "hardware/gpio.h"
-#include "pico/stdlib.h"
 
 // timing of keypresses
 #define TYPING_KEYDOWN_MS  20
 #define TYPING_DELAY_MS    20
 
-// Button debounce time in milliseconds
-#define DEBOUNCE_MS 300
+// GPIO Pin Definitions
+#define GPIO_PIN_D  10   // d
+#define GPIO_PIN_W  11   // w
+#define GPIO_PIN_A  21   // a
+#define GPIO_PIN_S  20   // s
 
-// GPIO pins for buttons
-#define GPIO_BUTTON_D 10  // D key
-#define GPIO_BUTTON_W 11  // W key
-#define GPIO_BUTTON_A 21  // A key
-#define GPIO_BUTTON_S 20  // S key
-
-// GPIO pin for status LED
-#define GPIO_STATUS_LED 15  // Status LED
+// GPIO debounce time in milliseconds
+#define DEBOUNCE_TIME 200
 
 // When not set to 0xffff, sniff and sniff subrating are enabled
 static uint16_t host_max_latency = 1600;
@@ -203,11 +199,15 @@ static uint8_t                send_modifier;
 static uint8_t                send_keycode;
 static bool                   send_active;
 
-// GPIO button debounce timers
-static uint32_t last_button_press_time[4] = {0, 0, 0, 0};
+// GPIO button states and timing
+static uint64_t last_press_time_d = 0;
+static uint64_t last_press_time_w = 0;
+static uint64_t last_press_time_a = 0;
+static uint64_t last_press_time_s = 0;
 
+// Bluetooth connection address - you can set this to connect to a specific device
 static bd_addr_t device_addr;
-static const char * device_addr_string = "BC:EC:5D:E6:15:03"; // Target device address
+static const char * device_addr_string = "BC:EC:5D:E6:15:03";
 
 static enum {
     APP_BOOTING,
@@ -216,15 +216,9 @@ static enum {
     APP_CONNECTED
 } app_state = APP_BOOTING;
 
-// Function to update LED status based on connection state
-static void update_status_led(void) {
-    if (app_state == APP_CONNECTED) {
-        gpio_put(GPIO_STATUS_LED, 1);  // Turn LED ON when connected
-        printf("Status LED: ON (Connected)\n");
-    } else {
-        gpio_put(GPIO_STATUS_LED, 0);  // Turn LED OFF when not connected
-        printf("Status LED: OFF (Disconnected)\n");
-    }
+// Function to get current time in milliseconds for debouncing
+static uint64_t get_current_time_ms(void) {
+    return to_ms_since_boot(get_absolute_time());
 }
 
 // HID Keyboard lookup
@@ -294,90 +288,94 @@ static void queue_character(char character){
     }
 }
 
-// GPIO interrupt handler for buttons
-void gpio_callback(uint gpio, uint32_t events) {
-    // Only process on falling edge (button press)
-    if (events & GPIO_IRQ_EDGE_FALL) {
-        // Get current time for debouncing
-        uint32_t current_time = to_ms_since_boot(get_absolute_time());
-        uint8_t button_index;
-        char key_to_send = 0;
+// GPIO Button callback function - handles all GPIO interrupts
+static void gpio_callback(uint gpio, uint32_t events) {
+    // Only process rising edge events (button presses)
+    if (events & GPIO_IRQ_EDGE_RISE) {
+        uint64_t current_time = get_current_time_ms();
         
-        // Map GPIO to array index and key character
-        switch(gpio) {
-            case GPIO_BUTTON_D:
-                button_index = 0;
-                key_to_send = 'd';
-                break;
-            case GPIO_BUTTON_W:
-                button_index = 1;
-                key_to_send = 'w';
-                break;
-            case GPIO_BUTTON_A:
-                button_index = 2;
-                key_to_send = 'a';
-                break;
-            case GPIO_BUTTON_S:
-                button_index = 3;
-                key_to_send = 's';
-                break;
-            default:
-                return; // Unknown GPIO
-        }
-        
-        // Debounce check
-        if (current_time - last_button_press_time[button_index] > DEBOUNCE_MS) {
-            last_button_press_time[button_index] = current_time;
-            
+        // Process based on which pin triggered the interrupt
+        if (gpio == GPIO_PIN_D && (current_time - last_press_time_d > DEBOUNCE_TIME)) {
             if (app_state == APP_CONNECTED) {
-                // Send key press if connected
-                printf("Button press on GPIO %d - sending '%c'\n", gpio, key_to_send);
-                queue_character(key_to_send);
-            } else if (app_state == APP_NOT_CONNECTED && gpio == GPIO_BUTTON_D) {
-                // Use button D to initiate connection if not connected
-                printf("Button press on GPIO %d - connecting to %s\n", gpio, bd_addr_to_str(device_addr));
+                printf("Button D pressed\n");
+                queue_character('d');
+            } else if (app_state == APP_NOT_CONNECTED) {
+                printf("Button pressed - connecting to %s...\n", bd_addr_to_str(device_addr));
                 hid_device_connect(device_addr, &hid_cid);
-                app_state = APP_CONNECTING;
             }
+            last_press_time_d = current_time;
+        }
+        else if (gpio == GPIO_PIN_W && (current_time - last_press_time_w > DEBOUNCE_TIME)) {
+            if (app_state == APP_CONNECTED) {
+                printf("Button W pressed\n");
+                queue_character('w');
+            } else if (app_state == APP_NOT_CONNECTED) {
+                printf("Button pressed - connecting to %s...\n", bd_addr_to_str(device_addr));
+                hid_device_connect(device_addr, &hid_cid);
+            }
+            last_press_time_w = current_time;
+        }
+        else if (gpio == GPIO_PIN_A && (current_time - last_press_time_a > DEBOUNCE_TIME)) {
+            if (app_state == APP_CONNECTED) {
+                printf("Button A pressed\n");
+                queue_character('a');
+            } else if (app_state == APP_NOT_CONNECTED) {
+                printf("Button pressed - connecting to %s...\n", bd_addr_to_str(device_addr));
+                hid_device_connect(device_addr, &hid_cid);
+            }
+            last_press_time_a = current_time;
+        }
+        else if (gpio == GPIO_PIN_S && (current_time - last_press_time_s > DEBOUNCE_TIME)) {
+            if (app_state == APP_CONNECTED) {
+                printf("Button S pressed\n");
+                queue_character('s');
+            } else if (app_state == APP_NOT_CONNECTED) {
+                printf("Button pressed - connecting to %s...\n", bd_addr_to_str(device_addr));
+                hid_device_connect(device_addr, &hid_cid);
+            }
+            last_press_time_s = current_time;
         }
     }
 }
 
-// Initialize GPIO for status LED
-static void init_status_led(void) {
-    gpio_init(GPIO_STATUS_LED);
-    gpio_set_dir(GPIO_STATUS_LED, GPIO_OUT);
-    gpio_put(GPIO_STATUS_LED, 0);  // Start with LED OFF
-    printf("Status LED initialized on GPIO %d\n", GPIO_STATUS_LED);
+// Set up the GPIO pins
+static void setup_gpio(void) {
+    // Initialize GPIO
+    stdio_init_all();
+    
+    // Set the pin modes (input with pull-down resistor)
+    gpio_init(GPIO_PIN_D);
+    gpio_init(GPIO_PIN_W);
+    gpio_init(GPIO_PIN_A);
+    gpio_init(GPIO_PIN_S);
+    
+    // Set pins as inputs
+    gpio_set_dir(GPIO_PIN_D, GPIO_IN);
+    gpio_set_dir(GPIO_PIN_W, GPIO_IN);
+    gpio_set_dir(GPIO_PIN_A, GPIO_IN);
+    gpio_set_dir(GPIO_PIN_S, GPIO_IN);
+    
+    // Enable pull-down resistors
+    gpio_pull_down(GPIO_PIN_D);
+    gpio_pull_down(GPIO_PIN_W);
+    gpio_pull_down(GPIO_PIN_A);
+    gpio_pull_down(GPIO_PIN_S);
+    
+    // Set up GPIO interrupts
+    gpio_set_irq_enabled_with_callback(GPIO_PIN_D, GPIO_IRQ_EDGE_RISE, true, &gpio_callback);
+    gpio_set_irq_enabled(GPIO_PIN_W, GPIO_IRQ_EDGE_RISE, true);
+    gpio_set_irq_enabled(GPIO_PIN_A, GPIO_IRQ_EDGE_RISE, true);
+    gpio_set_irq_enabled(GPIO_PIN_S, GPIO_IRQ_EDGE_RISE, true);
+    
+    printf("GPIO pins initialized for buttons\n");
 }
 
-// Initialize GPIO for buttons
-static void init_gpio_buttons(void) {
-    // Initialize all buttons with pull-ups
-    gpio_init(GPIO_BUTTON_D);
-    gpio_set_dir(GPIO_BUTTON_D, GPIO_IN);
-    gpio_pull_up(GPIO_BUTTON_D);
-    
-    gpio_init(GPIO_BUTTON_W);
-    gpio_set_dir(GPIO_BUTTON_W, GPIO_IN);
-    gpio_pull_up(GPIO_BUTTON_W);
-    
-    gpio_init(GPIO_BUTTON_A);
-    gpio_set_dir(GPIO_BUTTON_A, GPIO_IN);
-    gpio_pull_up(GPIO_BUTTON_A);
-    
-    gpio_init(GPIO_BUTTON_S);
-    gpio_set_dir(GPIO_BUTTON_S, GPIO_IN);
-    gpio_pull_up(GPIO_BUTTON_S);
-    
-    // Set up GPIO interrupts for all buttons (falling edge)
-    gpio_set_irq_enabled_with_callback(GPIO_BUTTON_D, GPIO_IRQ_EDGE_FALL, true, &gpio_callback);
-    gpio_set_irq_enabled(GPIO_BUTTON_W, GPIO_IRQ_EDGE_FALL, true);
-    gpio_set_irq_enabled(GPIO_BUTTON_A, GPIO_IRQ_EDGE_FALL, true);
-    gpio_set_irq_enabled(GPIO_BUTTON_S, GPIO_IRQ_EDGE_FALL, true);
-    
-    printf("GPIO buttons initialized (D=%d, W=%d, A=%d, S=%d)\n", 
-           GPIO_BUTTON_D, GPIO_BUTTON_W, GPIO_BUTTON_A, GPIO_BUTTON_S);
+static void cleanup_gpio(void) {
+    // Disable GPIO interrupts
+    gpio_set_irq_enabled(GPIO_PIN_D, GPIO_IRQ_EDGE_RISE, false);
+    gpio_set_irq_enabled(GPIO_PIN_W, GPIO_IRQ_EDGE_RISE, false);
+    gpio_set_irq_enabled(GPIO_PIN_A, GPIO_IRQ_EDGE_RISE, false);
+    gpio_set_irq_enabled(GPIO_PIN_S, GPIO_IRQ_EDGE_RISE, false);
 }
 
 static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t * packet, uint16_t packet_size){
@@ -390,8 +388,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t * pack
                 case BTSTACK_EVENT_STATE:
                     if (btstack_event_state_get_state(packet) != HCI_STATE_WORKING) return;
                     app_state = APP_NOT_CONNECTED;
-                    update_status_led();  // Update LED status
-                    printf("BTstack ready. Press button D to connect or pair.\n");
+                    printf("BTstack working, press any GPIO button to connect\n");
                     break;
 
                 case HCI_EVENT_USER_CONFIRMATION_REQUEST:
@@ -409,20 +406,17 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t * pack
                                 printf("Connection failed, status 0x%x\n", status);
                                 app_state = APP_NOT_CONNECTED;
                                 hid_cid = 0;
-                                update_status_led();  // Update LED status
                                 return;
                             }
                             app_state = APP_CONNECTED;
                             hid_cid = hid_subevent_connection_opened_get_hid_cid(packet);
-                            update_status_led();  // Update LED status
-                            printf("HID Connected! Press WASD buttons to send keystrokes.\n");
+                            printf("HID Connected, buttons are now active!\n");
                             break;
                         case HID_SUBEVENT_CONNECTION_CLOSED:
                             btstack_run_loop_remove_timer(&send_timer);
                             printf("HID Disconnected\n");
                             app_state = APP_NOT_CONNECTED;
                             hid_cid = 0;
-                            update_status_led();  // Update LED status
                             break;
                         case HID_SUBEVENT_CAN_SEND_NOW:
                             if (send_keycode){
@@ -453,42 +447,35 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t * pack
     }
 }
 
-/* @section Main Application Setup
- *
- * @text Listing MainConfiguration shows main application code. 
- * To run a HID Device service you need to initialize the SDP, and to create and register HID Device record with it. 
- * At the end the Bluetooth stack is started.
- */
+// Monitor GPIO pins for button presses
+static btstack_timer_source_t gpio_check_timer;
 
+static void gpio_check_handler(btstack_timer_source_t * ts) {
+    // No need to check GPIO state here since we're using interrupts
+    // Just reschedule the timer for other periodic checks if needed
+    btstack_run_loop_set_timer(ts, 100); // Check every 100ms
+    btstack_run_loop_add_timer(ts);
+}
+
+// Main application setup
 int btstack_main(int argc, const char * argv[]){
     (void)argc;
     (void)argv;
 
-    // Initialize Pico stdio
-    stdio_init_all();
-    
-    // Allow time for USB to initialize
-    sleep_ms(2000);
-    
-    printf("\n\nHID Keyboard Demo with GPIO Buttons Starting...\n");
-    
-    // Initialize status LED
-    init_status_led();
-    
-    // Initialize GPIO buttons
-    init_gpio_buttons();
-    
-    // Parse the target Bluetooth address
+    // Convert the BT address string to bd_addr_t
     sscanf_bd_addr(device_addr_string, device_addr);
+
+    // Setup GPIO pins for buttons
+    setup_gpio();
 
     // allow to get found by inquiry
     gap_discoverable_control(1);
     // use Limited Discoverable Mode; Peripheral; Keyboard as CoD
     gap_set_class_of_device(0x2540);
     // set local name to be identified - zeroes will be replaced by actual BD ADDR
-    gap_set_local_name("HID Keyboard Demo 00:00:00:00:00:00");
+    gap_set_local_name("Pico GPIO Keyboard 00:00:00:00:00:00");
     // allow for role switch in general and sniff mode
-    gap_set_default_link_policy_settings( LM_LINK_POLICY_ENABLE_ROLE_SWITCH | LM_LINK_POLICY_ENABLE_SNIFF_MODE );
+    gap_set_default_link_policy_settings(LM_LINK_POLICY_ENABLE_ROLE_SWITCH | LM_LINK_POLICY_ENABLE_SNIFF_MODE);
     // allow for role switch on outgoing connections - this allow HID Host to become master when we re-connect to it
     gap_set_allow_role_switch(true);
 
@@ -510,7 +497,7 @@ int btstack_main(int argc, const char * argv[]){
     uint8_t hid_normally_connectable = 1;
 
     hid_sdp_record_t hid_params = {
-        // hid sevice subclass 2540 Keyboard, hid counntry code 33 US
+        // hid service subclass 2540 Keyboard, hid country code 33 US
         0x2540, 33, 
         hid_virtual_cable, hid_remote_wake, 
         hid_reconnect_initiate, hid_normally_connectable,
@@ -523,13 +510,13 @@ int btstack_main(int argc, const char * argv[]){
     };
     
     hid_create_sdp_record(hid_service_buffer, sdp_create_service_record_handle(), &hid_params);
-    btstack_assert(de_get_len( hid_service_buffer) <= sizeof(hid_service_buffer));
+    btstack_assert(de_get_len(hid_service_buffer) <= sizeof(hid_service_buffer));
     sdp_register_service(hid_service_buffer);
 
     // See https://www.bluetooth.com/specifications/assigned-numbers/company-identifiers if you don't have a USB Vendor ID and need a Bluetooth Vendor ID
     // device info: BlueKitchen GmbH, product 1, version 1
     device_id_create_sdp_record(device_id_sdp_service_buffer, sdp_create_service_record_handle(), DEVICE_ID_VENDOR_ID_SOURCE_BLUETOOTH, BLUETOOTH_COMPANY_ID_BLUEKITCHEN_GMBH, 1, 1);
-    btstack_assert(de_get_len( device_id_sdp_service_buffer) <= sizeof(device_id_sdp_service_buffer));
+    btstack_assert(de_get_len(device_id_sdp_service_buffer) <= sizeof(device_id_sdp_service_buffer));
     sdp_register_service(device_id_sdp_service_buffer);
 
     // HID Device
@@ -544,10 +531,23 @@ int btstack_main(int argc, const char * argv[]){
 
     btstack_ring_buffer_init(&send_buffer, send_buffer_storage, sizeof(send_buffer_storage));
 
+    // Set up a timer to regularly check GPIO state
+    btstack_run_loop_set_timer_handler(&gpio_check_timer, gpio_check_handler);
+    btstack_run_loop_set_timer(&gpio_check_timer, 100); // First check in 100ms
+    btstack_run_loop_add_timer(&gpio_check_timer);
+
     // turn on!
     hci_power_control(HCI_POWER_ON);
     
-    printf("Bluetooth stack initialized. Press button D to connect.\n");
+    printf("Pico GPIO Keyboard ready! Press any button to connect.\n");
+    printf("Button mappings:\n");
+    printf("- GPIO 10: Key 'D'\n");
+    printf("- GPIO 11: Key 'W'\n");
+    printf("- GPIO 21: Key 'A'\n");
+    printf("- GPIO 20: Key 'S'\n");
     
     return 0;
 }
+
+// Don't forget to call cleanup_gpio() when your application exits
+// You might want to add a signal handler to catch SIGINT/SIGTERM and clean up properly
